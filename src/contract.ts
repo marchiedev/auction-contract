@@ -16,6 +16,100 @@ import { Player } from "./model/player";
   return this.toString();
 };
 
+// Used In Main Contract
+class NFTContractMetadata {
+  spec: string;
+  name: string;
+  symbol: string;
+  icon?: string;
+  base_uri?: string;
+  reference?: string;
+  reference_hash?: string;
+
+  constructor({
+    spec,
+    name,
+    symbol,
+    icon,
+    baseUri,
+    reference,
+    referenceHash,
+  }: {
+    spec: string;
+    name: string;
+    symbol: string;
+    icon?: string;
+    baseUri?: string;
+    reference?: string;
+    referenceHash?: string;
+  }) {
+    this.spec = spec; // required, essentially a version like "nft-1.0.0"
+    this.name = name; // required, ex. "Mosaics"
+    this.symbol = symbol; // required, ex. "MOSAIC"
+    this.icon = icon; // Data URL
+    this.base_uri = baseUri; // Centralized gateway known to have reliable access to decentralized storage assets referenced by `reference` or `media` URLs
+    this.reference = reference; // URL to a JSON file with more info
+    this.reference_hash = referenceHash; // Base64-encoded sha256 hash of JSON from reference field. Required if `reference` is included.
+  }
+}
+
+// Used In Token
+class TokenMetadata {
+  title?: string;
+  description?: string;
+  media?: string;
+  media_hash?: string;
+  copies?: number;
+  issued_at?: string;
+  expires_at?: string;
+  starts_at?: string;
+  updated_at?: string;
+  extra?: string;
+  reference?: string;
+  reference_hash?: string;
+
+  constructor({
+    title,
+    description,
+    media,
+    mediaHash,
+    copies,
+    issuedAt,
+    expiresAt,
+    startsAt,
+    updatedAt,
+    extra,
+    reference,
+    referenceHash,
+  }: {
+    title?: string;
+    description?: string;
+    media?: string;
+    mediaHash?: string;
+    copies?: number;
+    issuedAt?: string;
+    expiresAt?: string;
+    startsAt?: string;
+    updatedAt?: string;
+    extra?: string;
+    reference?: string;
+    referenceHash?: string;
+  }) {
+    this.title = title; // ex. "Arch Nemesis: Mail Carrier" or "Parcel #5055"
+    this.description = description; // free-form description
+    this.media = media; // URL to associated media, preferably to decentralized, content-addressed storage
+    this.media_hash = mediaHash; // Base64-encoded sha256 hash of content referenced by the `media` field. Required if `media` is included.
+    this.copies = copies; // number of copies of this set of metadata in existence when token was minted.
+    this.issued_at = issuedAt; // ISO 8601 datetime when token was issued or minted
+    this.expires_at = expiresAt; // ISO 8601 datetime when token expires
+    this.starts_at = startsAt; // ISO 8601 datetime when token starts being valid
+    this.updated_at = updatedAt; // ISO 8601 datetime when token was last updated
+    this.extra = extra; // anything extra the NFT wants to store on-chain. Can be stringified JSON.
+    this.reference = reference; // URL to an off-chain JSON file with more info.
+    this.reference_hash = referenceHash; // Base64-encoded sha256 hash of JSON from reference field. Required if `reference` is included.
+  }
+}
+
 class Token {
   token_id: string;
   owner_id: string;
@@ -26,12 +120,38 @@ class Token {
   }
 }
 
+//The Json token is what will be returned from view calls.
+export class JsonToken {
+  token_id: string;
+  owner_id: string | unknown;
+  metadata: TokenMetadata;
+
+  constructor({
+    tokenId,
+    ownerId,
+    metadata,
+  }: {
+    tokenId: string;
+    ownerId: string | unknown;
+    metadata: TokenMetadata;
+  }) {
+    //token ID
+    this.token_id = tokenId;
+    //owner of the token
+    this.owner_id = ownerId;
+    //token metadata
+    this.metadata = metadata;
+  }
+}
+
 // The @NearBindgen decorator allows this code to compile to Base64.
 @NearBindgen
 class AuctionContract extends NearContract {
   // NFT
   owner_id: string;
   owner_by_id: LookupMap;
+  token_metadata_by_id: LookupMap;
+  metadata: NFTContractMetadata;
 
   // variables for auction round
   startTime: bigint;
@@ -48,9 +168,20 @@ class AuctionContract extends NearContract {
   lastRoundWinner: string;
   lastRoundHighestBid: bigint;
 
-  constructor({ owner_id = "marchie.testnet" }: { owner_id: string }) {
+  constructor({
+    owner_id = "marchie.testnet",
+    metadata = {
+      spec: "nft-1.0.0",
+      name: "NFT Tutorial Contract",
+      symbol: "GOTEAM",
+    },
+  }: {
+    owner_id: string;
+    metadata?: NFTContractMetadata;
+  }) {
     super();
 
+    this.metadata = metadata;
     this.owner_id = near.currentAccountId();
     this.owner_by_id = new LookupMap("a");
 
@@ -98,6 +229,11 @@ class AuctionContract extends NearContract {
     const player = new Player({ address, amount });
 
     this.players.set(address, player);
+
+    // Send last current highest bid to last current winner
+    const promise = near.promiseBatchCreate(this.currentWinner);
+    near.promiseBatchActionTransfer(promise, this.currentHighestBid);
+    near.promiseReturn(promise);
 
     this.currentWinner = address;
     this.currentHighestBid = amount;
@@ -161,7 +297,6 @@ class AuctionContract extends NearContract {
     this.nftMint({
       token_id: this.roundId.toString(),
       token_owner_id: near.currentAccountId(),
-      token_metadata: "",
     });
   }
 
@@ -208,6 +343,11 @@ class AuctionContract extends NearContract {
   }
 
   // NFT
+  //get the information for a specific token ID
+  internalNftMetadata({ token_id }: { token_id: string }) {
+    return this.token_metadata_by_id.get(token_id);
+  }
+
   internalTransfer({
     sender_id,
     receiver_id,
@@ -352,17 +492,18 @@ class AuctionContract extends NearContract {
   nftMint({
     token_id,
     token_owner_id,
-    token_metadata: _,
+    token_metadata,
   }: {
     token_id: string;
     token_owner_id: string;
-    token_metadata: string;
+    token_metadata?: TokenMetadata;
   }) {
     let sender_id = near.predecessorAccountId();
     assert(sender_id === this.owner_id, "Unauthorized");
     assert(this.owner_by_id.get(token_id) === null, "Token ID must be unique");
 
     this.owner_by_id.set(token_id, token_owner_id);
+    this.token_metadata_by_id.set(token_id, token_metadata);
 
     return new Token(token_id, token_owner_id);
   }
@@ -374,6 +515,15 @@ class AuctionContract extends NearContract {
       return null;
     }
 
-    return new Token(token_id, owner_id);
+    let metadata = this.internalNftMetadata({ token_id });
+
+    //we return the JsonToken
+    let jsonToken = new JsonToken({
+      tokenId: token_id,
+      ownerId: owner_id,
+      metadata,
+    });
+
+    return jsonToken;
   }
 }
